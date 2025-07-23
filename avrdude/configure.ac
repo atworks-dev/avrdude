@@ -193,6 +193,16 @@ if test x$have_spidev == xyes; then
     AC_DEFINE([HAVE_SPIDEV])
 fi
 
+AH_TEMPLATE([HAVE_LIBGPIOD],
+            [Define if libgpiod support is enabled])
+PKG_CHECK_MODULES([LIBGPIOD], [libgpiod >= 1.6], [have_libgpiod=yes], [have_libgpiod=no])
+if test "$have_libgpiod" = "yes"; then
+    AC_DEFINE([HAVE_LIBGPIOD], [1], [Define if libgpiod is available])
+fi
+AM_CONDITIONAL([HAVE_LIBGPIOD], [test "$have_libgpiod" = "yes"])
+AC_SUBST(LIBGPIOD_CFLAGS)
+AC_SUBST(LIBGPIOD_LIBS)
+
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
 AC_HEADER_TIME
@@ -553,5 +563,11 @@ if test x$have_spidev = xyes; then
    echo "ENABLED    linuxspi"
 else
    echo "DISABLED   linnuxspi"
+fi
+
+if test x$have_libgpiod = xyes; then
+   echo "DO HAVE    libgpiod"
+else
+   echo "DON'T HAVE libgpiod"
 fi
 

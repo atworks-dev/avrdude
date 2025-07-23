@@ -55,15 +55,15 @@ DIST_SUBDIRS = @DIST_SUBDIRS_AC@
 
 AM_YFLAGS    = -d
 
-avrdude_CPPFLAGS = -DCONFIG_DIR=\"$(sysconfdir)\"
+avrdude_CPPFLAGS = -DCONFIG_DIR=\"$(sysconfdir)\" @LIBGPIOD_CFLAGS@
 
-libavrdude_a_CPPFLAGS = -DCONFIG_DIR=\"$(sysconfdir)\"
+libavrdude_a_CPPFLAGS = -DCONFIG_DIR=\"$(sysconfdir)\" @LIBGPIOD_CFLAGS@
 
 avrdude_CFLAGS   = @ENABLE_WARNINGS@
 
 libavrdude_a_CFLAGS   = @ENABLE_WARNINGS@
 
-avrdude_LDADD  = $(top_builddir)/$(noinst_LIBRARIES) @LIBUSB_1_0@ @LIBUSB@ @LIBFTDI1@ @LIBFTDI@ @LIBHID@ @LIBELF@ @LIBPTHREAD@ -lm
+avrdude_LDADD  = $(top_builddir)/$(noinst_LIBRARIES) @LIBUSB_1_0@ @LIBUSB@ @LIBFTDI1@ @LIBFTDI@ @LIBHID@ @LIBELF@ @LIBPTHREAD@ @LIBGPIOD_LIBS@ -lm
 
 bin_PROGRAMS = avrdude
 

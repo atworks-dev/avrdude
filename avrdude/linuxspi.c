@@ -56,6 +56,10 @@
 #include <string.h>
 #include <math.h>
 
+#if HAVE_LIBGPIOD
+#include <gpiod.h>
+#endif
+
 /**
  * Data for the programmer
  */
@@ -63,6 +67,11 @@
 struct pdata
 {
     unsigned int speedHz;
+#if HAVE_LIBGPIOD
+    struct gpiod_chip *gpio_chip;
+    struct gpiod_line *gpio_line;
+    int used_libgpiod;  /* Flag to track if libgpiod was used */
+#endif
 };
 
 typedef enum {
@@ -82,6 +91,10 @@ typedef enum {
 //linuxspi specific functions
 static int linuxspi_spi_duplex(PROGRAMMER* pgm, unsigned char* tx, unsigned char* rx, int len);
 static int linuxspi_gpio_op_wr(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, char* val);
+static int linuxspi_gpio_modern(PROGRAMMER* pgm, int gpio_num, int value);
+static int linuxspi_gpio_op_wr_legacy(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, char* val);
+static int linuxspi_gpio_init(PROGRAMMER* pgm, int gpio_num);
+static int linuxspi_gpio_set_direction_value(PROGRAMMER* pgm, int gpio_num, const char* direction, int value);
 //interface - management
 static void linuxspi_setup(PROGRAMMER* pgm);
 static void linuxspi_teardown(PROGRAMMER* pgm);
@@ -135,12 +148,12 @@ static int linuxspi_spi_duplex(PROGRAMMER* pgm, unsigned char* tx, unsigned char
 }
 
 /**
- * @brief Performs an operation on a gpio. Writes to stderr if error.
+ * @brief Legacy GPIO operation using sysfs interface.
  * @param op Operation to perform
  * @param gpio 
  * @return -1 if failed, 0 otherwise
  */
-static int linuxspi_gpio_op_wr(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, char* val)
+static int linuxspi_gpio_op_wr_legacy(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, char* val)
 {
     char* fn = malloc(PATH_MAX); //filename
     gpio &= ~PIN_INVERSE; // Remove the inversion flag
@@ -194,6 +207,145 @@ static int linuxspi_gpio_op_wr(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, c
     return 0;
 }
 
+/**
+ * @brief Initialize GPIO using modern libgpiod interface
+ * @param pgm Programmer data
+ * @param gpio_num GPIO number
+ * @return -1 if failed, 0 otherwise
+ */
+static int linuxspi_gpio_init(PROGRAMMER* pgm, int gpio_num)
+{
+    IMPORT_PDATA(pgm);
+    
+#if HAVE_LIBGPIOD
+    // Try libgpiod v1.6 API first
+    pdata->gpio_chip = gpiod_chip_open("/dev/gpiochip0");
+    if (pdata->gpio_chip) {
+        unsigned int gpio_offset = gpio_num & ~PIN_INVERSE;
+        pdata->gpio_line = gpiod_chip_get_line(pdata->gpio_chip, gpio_offset);
+        
+        if (pdata->gpio_line) {
+            // Request line as output with initial value LOW (reset active)
+            int ret = gpiod_line_request_output(pdata->gpio_line, "avrdude-linuxspi", 0);
+            if (ret == 0) {
+                fprintf(stderr, "%s: info: Using libgpiod for GPIO%d control\n", progname, gpio_offset);
+                pdata->used_libgpiod = 1;
+                return 0;
+            } else {
+                fprintf(stderr, "%s: error: Failed to request GPIO%d as output\n", progname, gpio_offset);
+                pdata->gpio_line = NULL;
+            }
+        } else {
+            fprintf(stderr, "%s: error: Failed to get GPIO%d line\n", progname, gpio_offset);
+        }
+        
+        gpiod_chip_close(pdata->gpio_chip);
+        pdata->gpio_chip = NULL;
+    }
+#endif
+    
+    fprintf(stderr, "%s: info: libgpiod not available, falling back to sysfs GPIO\n", progname);
+    return 0; // fallback to legacy will be handled in gpio operations
+}
+
+/**
+ * @brief Set GPIO direction and initial value using modern interface
+ * @param pgm Programmer data  
+ * @param gpio_num GPIO number
+ * @param direction "in" or "out"
+ * @param value Initial value for output (0 or 1)
+ * @return -1 if failed, 0 otherwise
+ */
+static int linuxspi_gpio_set_direction_value(PROGRAMMER* pgm, int gpio_num, const char* direction, int value)
+{
+    IMPORT_PDATA(pgm);
+    
+#if HAVE_LIBGPIOD
+    if (pdata->gpio_line) {
+        // Using libgpiod - direction was set during init, just set value
+        int gpio_value = (gpio_num & PIN_INVERSE) ? !value : value;
+        
+        if (gpiod_line_set_value(pdata->gpio_line, gpio_value) == 0) {
+            return 0;
+        } else {
+            fprintf(stderr, "%s: error: Failed to set GPIO%d value via libgpiod\n", progname, gpio_num & ~PIN_INVERSE);
+            return -1;
+        }
+    }
+#endif
+    
+    // Fallback to legacy sysfs interface
+    char* buf = malloc(32);
+    sprintf(buf, "%d", gpio_num & ~PIN_INVERSE);
+    
+    // Export GPIO
+    if (linuxspi_gpio_op_wr_legacy(pgm, LINUXSPI_GPIO_EXPORT, gpio_num, buf) < 0) {
+        free(buf);
+        return -1;
+    }
+    
+    // Set direction with initial value
+    const char* dir_value = (strcmp(direction, "out") == 0) ? 
+                           (gpio_num & PIN_INVERSE ? (value ? "low" : "high") : (value ? "high" : "low")) : 
+                           "in";
+    
+    if (linuxspi_gpio_op_wr_legacy(pgm, LINUXSPI_GPIO_DIRECTION, gpio_num, (char*)dir_value) < 0) {
+        free(buf);
+        return -1;
+    }
+    
+    free(buf);
+    return 0;
+}
+
+/**
+ * @brief Modern GPIO control function with libgpiod and sysfs fallback
+ * @param pgm Programmer data
+ * @param gpio_num GPIO number  
+ * @param value Value to set (0 or 1)
+ * @return -1 if failed, 0 otherwise
+ */
+static int linuxspi_gpio_modern(PROGRAMMER* pgm, int gpio_num, int value)
+{
+    IMPORT_PDATA(pgm);
+    
+#if HAVE_LIBGPIOD
+    if (pdata->gpio_line) {
+        int gpio_value = (gpio_num & PIN_INVERSE) ? !value : value;
+        
+        if (gpiod_line_set_value(pdata->gpio_line, gpio_value) == 0) {
+            return 0;
+        } else {
+            fprintf(stderr, "%s: error: Failed to set GPIO%d value via libgpiod\n", progname, gpio_num & ~PIN_INVERSE);
+            return -1;
+        }
+    }
+#endif
+    
+    // Fallback to legacy sysfs interface
+    const char* val_str = (gpio_num & PIN_INVERSE) ? (value ? "0" : "1") : (value ? "1" : "0");
+    return linuxspi_gpio_op_wr_legacy(pgm, LINUXSPI_GPIO_VALUE, gpio_num, (char*)val_str);
+}
+
+/**
+ * @brief Wrapper function that maintains compatibility with existing interface
+ * @param op Operation to perform  
+ * @param gpio GPIO number
+ * @param val Value string
+ * @return -1 if failed, 0 otherwise
+ */
+static int linuxspi_gpio_op_wr(PROGRAMMER* pgm, LINUXSPI_GPIO_OP op, int gpio, char* val)
+{
+    // For VALUE operations, try modern GPIO first
+    if (op == LINUXSPI_GPIO_VALUE) {
+        int value = atoi(val);
+        return linuxspi_gpio_modern(pgm, gpio, value);
+    }
+    
+    // For other operations, use legacy interface
+    return linuxspi_gpio_op_wr_legacy(pgm, op, gpio, val);
+}
+
 static void linuxspi_setup(PROGRAMMER* pgm)
 {
     if ((pgm->cookie = malloc(sizeof(struct pdata))) == 0)
@@ -202,6 +354,13 @@ static void linuxspi_setup(PROGRAMMER* pgm)
         exit(1);
     }
     memset(pgm->cookie, 0, sizeof(struct pdata));
+    
+#if HAVE_LIBGPIOD
+    IMPORT_PDATA(pgm);
+    pdata->gpio_chip = NULL;
+    pdata->gpio_line = NULL;
+    pdata->used_libgpiod = 0;
+#endif
 }
 
 static void linuxspi_teardown(PROGRAMMER* pgm)
@@ -225,19 +384,16 @@ static int linuxspi_open(PROGRAMMER* pgm, char* port)
         exit(1);
     }
 
-    //export reset pin
-    buf = malloc(32);
-    sprintf(buf, "%d", pgm->pinno[PIN_AVR_RESET] &~PIN_INVERSE);
-    if (linuxspi_gpio_op_wr(pgm, LINUXSPI_GPIO_EXPORT, pgm->pinno[PIN_AVR_RESET], buf) < 0)
+    // Initialize GPIO for reset control
+    if (linuxspi_gpio_init(pgm, pgm->pinno[PIN_AVR_RESET]) < 0)
     {
-        free(buf);
+        fprintf(stderr, "%s: error: Failed to initialize GPIO%d\n", progname, pgm->pinno[PIN_AVR_RESET] & ~PIN_INVERSE);
         return -1;
     }
-    free(buf);
     
-    //set reset to output active and write initial value at same time
-    //this prevents glitches https://www.kernel.org/doc/Documentation/gpio/sysfs.txt
-    if (linuxspi_gpio_op_wr(pgm, LINUXSPI_GPIO_DIRECTION, pgm->pinno[PIN_AVR_RESET], pgm->pinno[PIN_AVR_RESET]&PIN_INVERSE ? "high" : "low") < 0)
+    // Set GPIO as output with initial state LOW (reset active)
+    // This prevents glitches during initialization
+    if (linuxspi_gpio_set_direction_value(pgm, pgm->pinno[PIN_AVR_RESET], "out", 0) < 0)
     {
         return -1;
     }
@@ -250,15 +406,40 @@ static int linuxspi_open(PROGRAMMER* pgm, char* port)
 
 static void linuxspi_close(PROGRAMMER* pgm)
 {
-    char* buf;
+    IMPORT_PDATA(pgm);
     
-    //set reset to input
-    linuxspi_gpio_op_wr(pgm, LINUXSPI_GPIO_DIRECTION, pgm->pinno[PIN_AVR_RESET], "in");
+#if HAVE_LIBGPIOD
+    // Set reset to HIGH (inactive/released state) before cleanup
+    if (pdata->gpio_line) {
+        // Release reset by setting it HIGH (this matches the "in" behavior of sysfs)
+        int release_value = (pgm->pinno[PIN_AVR_RESET] & PIN_INVERSE) ? 0 : 1;
+        gpiod_line_set_value(pdata->gpio_line, release_value);
+    }
     
-    //unexport reset
-    buf = malloc(32);
-    sprintf(buf, "%d", pgm->pinno[PIN_AVR_RESET]);
-    linuxspi_gpio_op_wr(pgm, LINUXSPI_GPIO_UNEXPORT, pgm->pinno[PIN_AVR_RESET], buf);
+    // Clean up libgpiod resources
+    if (pdata->gpio_line) {
+        gpiod_line_release(pdata->gpio_line);
+        pdata->gpio_line = NULL;
+    }
+    if (pdata->gpio_chip) {
+        gpiod_chip_close(pdata->gpio_chip);
+        pdata->gpio_chip = NULL;
+    }
+#endif
+    
+    // If we used sysfs, clean it up
+    if (!pdata->used_libgpiod) {
+        char* buf;
+        
+        //set reset to input (this releases reset to HIGH state)
+        linuxspi_gpio_op_wr_legacy(pgm, LINUXSPI_GPIO_DIRECTION, pgm->pinno[PIN_AVR_RESET], "in");
+        
+        //unexport reset
+        buf = malloc(32);
+        sprintf(buf, "%d", pgm->pinno[PIN_AVR_RESET] & ~PIN_INVERSE);
+        linuxspi_gpio_op_wr_legacy(pgm, LINUXSPI_GPIO_UNEXPORT, pgm->pinno[PIN_AVR_RESET], buf);
+        free(buf);
+    }
 }
 
 static void linuxspi_disable(PROGRAMMER* pgm)
