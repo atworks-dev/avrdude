@@ -1263,8 +1263,17 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
 
       /* Read EEPROM contents before chip erase */
       printf("Reading EEPROM contents before chip erase...\n");
-      rc = avr_read(pgm, p, "eeprom", 0, eeprom_backup, eeprom_size);
-      if (rc < 0) {
+
+      /* Read EEPROM byte by byte into backup buffer */
+      int read_failed = 0;
+      for (unsigned int addr = 0; addr < eeprom_size && !read_failed; addr++) {
+        rc = avr_read_byte(pgm, p, eeprom_mem, addr, &eeprom_backup[addr]);
+        if (rc < 0) {
+          read_failed = 1;
+        }
+      }
+
+      if (read_failed) {
         fprintf(stderr, "Warning: Failed to read EEPROM contents for backup\n");
         free(eeprom_backup);
         eeprom_backup = NULL;
@@ -1278,8 +1287,17 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
     /* Restore EEPROM contents if backup was successful */
     if (rc >= 0 && eeprom_backup != NULL) {
       printf("Restoring EEPROM contents after chip erase...\n");
-      int restore_rc = avr_write(pgm, p, "eeprom", 0, eeprom_backup, eeprom_size);
-      if (restore_rc < 0) {
+
+      /* Write EEPROM byte by byte from backup buffer */
+      int write_failed = 0;
+      for (unsigned int addr = 0; addr < eeprom_size && !write_failed; addr++) {
+        rc = avr_write_byte(pgm, p, eeprom_mem, addr, eeprom_backup[addr]);
+        if (rc < 0) {
+          write_failed = 1;
+        }
+      }
+
+      if (write_failed) {
         fprintf(stderr, "Warning: Failed to restore EEPROM contents after chip erase\n");
       } else {
         printf("EEPROM contents successfully preserved\n");
