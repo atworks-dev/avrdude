@@ -1216,6 +1216,47 @@ int avr_chip_erase(PROGRAMMER * pgm, AVRPART * p)
 }
 
 /*
+ * Erase only the flash memory instead of the entire chip.
+ * This preserves EEPROM contents while erasing flash.
+ */
+int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
+{
+  AVRMEM * flash_mem;
+  const char * memname = (p->flags & AVRPART_HAS_PDI) ? "application" : "flash";
+  int rc = 0;
+  
+  flash_mem = avr_locate_mem(p, memname);
+  if (flash_mem == NULL) {
+    fprintf(stderr, "No %s memory found for part %s\n", memname, p->desc);
+    return -1;
+  }
+  
+  if (pgm->page_erase != NULL && flash_mem->page_size > 0) {
+    /* Use page erase for flash memory */
+    unsigned int addr;
+    int npages = (flash_mem->size + flash_mem->page_size - 1) / flash_mem->page_size;
+    int page_num = 0;
+    
+    for (addr = 0; addr < flash_mem->size; addr += flash_mem->page_size) {
+      rc = pgm->page_erase(pgm, p, flash_mem, addr);
+      if (rc < 0) {
+        fprintf(stderr, "Failed to erase %s page at address 0x%04x\n", memname, addr);
+        return rc;
+      }
+      page_num++;
+      report_progress(page_num, npages, page_num == 1 ? "Erasing flash" : NULL);
+    }
+    report_progress(npages, npages, NULL);
+  } else {
+    /* Fall back to chip erase if page erase is not available */
+    fprintf(stderr, "Warning: Page erase not available, performing chip erase\n");
+    rc = pgm->chip_erase(pgm, p);
+  }
+  
+  return rc;
+}
+
+/*
  * Report the progress of a read or write operation from/to the
  * device.
  *

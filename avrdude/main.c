@@ -1180,18 +1180,18 @@ int main(int argc, char * argv [])
 
   if (init_ok && erase) {
     /*
-     * erase the chip's flash and eeprom memories, this is required
-     * before the chip can accept new programming
+     * erase flash memory only, preserving EEPROM contents
+     * this is required before the chip can accept new flash programming
      */
     if (uflags & UF_NOWRITE) {
       fprintf(stderr,
-	      "%s: conflicting -e and -n options specified, NOT erasing chip\n",
+	      "%s: conflicting -e and -n options specified, NOT erasing flash\n",
 	      progname);
     } else {
       if (quell_progress < 2) {
-      	fprintf(stderr, "%s: erasing chip\n", progname);
+      	fprintf(stderr, "%s: erasing flash memory\n", progname);
       }
-      exitrc = avr_chip_erase(pgm, p);
+      exitrc = avr_flash_erase(pgm, p);
       if(exitrc) goto main_exit;
     }
   }

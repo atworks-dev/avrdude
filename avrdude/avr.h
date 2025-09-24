@@ -68,6 +68,8 @@ int avr_mem_hiaddr(AVRMEM * mem);
 
 int avr_chip_erase(PROGRAMMER * pgm, AVRPART * p);
 
+int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p);
+
 void report_progress (int completed, int total, char *hdr);
 
 #ifdef __cplusplus
