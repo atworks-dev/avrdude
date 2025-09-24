@@ -1267,7 +1267,7 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
       /* Read EEPROM byte by byte into backup buffer */
       int read_failed = 0;
       for (unsigned int addr = 0; addr < eeprom_size && !read_failed; addr++) {
-        rc = avr_read_byte(pgm, p, eeprom_mem, addr, &eeprom_backup[addr]);
+        rc = avr_read_byte_default(pgm, p, eeprom_mem, addr, &eeprom_backup[addr]);
         if (rc < 0) {
           read_failed = 1;
         }
