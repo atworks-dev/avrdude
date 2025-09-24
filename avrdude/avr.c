@@ -1236,7 +1236,7 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
     unsigned int addr;
     int npages = (flash_mem->size + flash_mem->page_size - 1) / flash_mem->page_size;
     int page_num = 0;
-    
+
     for (addr = 0; addr < flash_mem->size; addr += flash_mem->page_size) {
       rc = pgm->page_erase(pgm, p, flash_mem, addr);
       if (rc < 0) {
@@ -1247,9 +1247,64 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
       report_progress(page_num, npages, page_num == 1 ? "Erasing flash" : NULL);
     }
     report_progress(npages, npages, NULL);
+  } else if (strcmp(pgm->type, "linuxspi") == 0 && pgm->cmd != NULL && flash_mem->page_size > 0) {
+    /* SPI-specific flash-only erase using page erase commands */
+    unsigned int addr;
+    int npages = (flash_mem->size + flash_mem->page_size - 1) / flash_mem->page_size;
+    int page_num = 0;
+    unsigned char cmd[4], res[4];
+
+    if (quell_progress < 2) {
+      fprintf(stderr, "%s: erasing flash pages (SPI mode, preserving EEPROM)\n", progname);
+    }
+
+    for (addr = 0; addr < flash_mem->size; addr += flash_mem->page_size) {
+      /* Page Erase command for ATmega devices via SPI:
+       * 1. Load page address
+       * 2. Execute page erase command
+       */
+
+      /* Load page address using "Load Program Memory Page" instruction */
+      memset(cmd, 0, sizeof(cmd));
+      cmd[0] = 0x40; /* Load Program Memory Page, Low byte */
+      cmd[1] = (addr >> 9) & 0xFF;   /* Page address high byte */
+      cmd[2] = (addr >> 1) & 0xFF;   /* Page address low byte */
+      cmd[3] = 0xFF;                 /* Dummy data */
+      rc = pgm->cmd(pgm, cmd, res);
+      if (rc < 0) {
+        fprintf(stderr, "Failed to load page address 0x%04x\n", addr);
+        break;
+      }
+
+      /* Execute Page Erase command */
+      memset(cmd, 0, sizeof(cmd));
+      cmd[0] = 0x81; /* Page Erase command */
+      cmd[1] = (addr >> 9) & 0xFF;   /* Page address high byte */
+      cmd[2] = (addr >> 1) & 0xFF;   /* Page address low byte */
+      cmd[3] = 0x00;
+      rc = pgm->cmd(pgm, cmd, res);
+      if (rc < 0) {
+        fprintf(stderr, "Failed to erase flash page at address 0x%04x\n", addr);
+        break;
+      }
+
+      /* Wait for page erase to complete (typical time: 3-4.5ms) */
+      usleep(4500);
+
+      page_num++;
+      report_progress(page_num, npages, page_num == 1 ? "Erasing flash pages" : NULL);
+    }
+    report_progress(npages, npages, NULL);
+
+    if (rc < 0) {
+      fprintf(stderr, "SPI flash erase failed, falling back to chip erase\n");
+      rc = pgm->chip_erase(pgm, p);
+    }
   } else {
-    /* Fall back to chip erase if page erase is not available */
-    fprintf(stderr, "Warning: Page erase not available, performing chip erase\n");
+    /* Fall back to chip erase for non-SPI programmers without page erase */
+    if (quell_progress < 2) {
+      fprintf(stderr, "Warning: Flash-only erase not available for this programmer, performing chip erase\n");
+    }
     rc = pgm->chip_erase(pgm, p);
   }
   
