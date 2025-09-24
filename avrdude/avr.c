@@ -1248,48 +1248,64 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
     }
     report_progress(npages, npages, NULL);
   } else if (strcmp(pgm->type, "linuxspi") == 0 && pgm->cmd != NULL && flash_mem->page_size > 0) {
-    /* SPI-specific flash-only erase using page erase commands */
+    /* SPI-specific flash-only erase by writing 0xFF to all pages (preserving EEPROM) */
     unsigned int addr;
     int npages = (flash_mem->size + flash_mem->page_size - 1) / flash_mem->page_size;
     int page_num = 0;
     unsigned char cmd[4], res[4];
 
     if (quell_progress < 2) {
-      fprintf(stderr, "%s: erasing flash pages (SPI mode, preserving EEPROM)\n", progname);
+      fprintf(stderr, "%s: erasing flash pages by writing 0xFF (SPI mode, preserving EEPROM)\n", progname);
     }
 
     for (addr = 0; addr < flash_mem->size; addr += flash_mem->page_size) {
-      /* Page Erase command for ATmega devices via SPI:
-       * 1. Load page address
-       * 2. Execute page erase command
-       */
+      int i;
 
-      /* Load page address using "Load Program Memory Page" instruction */
+      /* Load entire page with 0xFF bytes (erased state) */
+      for (i = 0; i < flash_mem->page_size; i += 2) {
+        unsigned int word_addr = i >> 1; /* Word address within page */
+
+        /* Load Program Memory Page, Low byte */
+        memset(cmd, 0, sizeof(cmd));
+        cmd[0] = 0x40; /* Load Program Memory Page, Low byte */
+        cmd[1] = 0x00; /* Not used */
+        cmd[2] = word_addr & 0xFF; /* Word address within page */
+        cmd[3] = 0xFF; /* Data: 0xFF (erased state) */
+        rc = pgm->cmd(pgm, cmd, res);
+        if (rc < 0) {
+          fprintf(stderr, "Failed to load page low byte at word address 0x%02x\n", word_addr);
+          break;
+        }
+
+        /* Load Program Memory Page, High byte */
+        memset(cmd, 0, sizeof(cmd));
+        cmd[0] = 0x48; /* Load Program Memory Page, High byte */
+        cmd[1] = 0x00; /* Not used */
+        cmd[2] = word_addr & 0xFF; /* Word address within page */
+        cmd[3] = 0xFF; /* Data: 0xFF (erased state) */
+        rc = pgm->cmd(pgm, cmd, res);
+        if (rc < 0) {
+          fprintf(stderr, "Failed to load page high byte at word address 0x%02x\n", word_addr);
+          break;
+        }
+      }
+
+      if (rc < 0) break;
+
+      /* Write the page to flash */
       memset(cmd, 0, sizeof(cmd));
-      cmd[0] = 0x40; /* Load Program Memory Page, Low byte */
+      cmd[0] = 0x4C; /* Write Program Memory Page */
       cmd[1] = (addr >> 9) & 0xFF;   /* Page address high byte */
-      cmd[2] = (addr >> 1) & 0xFF;   /* Page address low byte */
-      cmd[3] = 0xFF;                 /* Dummy data */
+      cmd[2] = (addr >> 1) & 0xFF;   /* Page address low byte (word address) */
+      cmd[3] = 0x00; /* Not used */
       rc = pgm->cmd(pgm, cmd, res);
       if (rc < 0) {
-        fprintf(stderr, "Failed to load page address 0x%04x\n", addr);
+        fprintf(stderr, "Failed to write flash page at address 0x%04x\n", addr);
         break;
       }
 
-      /* Execute Page Erase command */
-      memset(cmd, 0, sizeof(cmd));
-      cmd[0] = 0x81; /* Page Erase command */
-      cmd[1] = (addr >> 9) & 0xFF;   /* Page address high byte */
-      cmd[2] = (addr >> 1) & 0xFF;   /* Page address low byte */
-      cmd[3] = 0x00;
-      rc = pgm->cmd(pgm, cmd, res);
-      if (rc < 0) {
-        fprintf(stderr, "Failed to erase flash page at address 0x%04x\n", addr);
-        break;
-      }
-
-      /* Wait for page erase to complete (typical time: 3-4.5ms) */
-      usleep(4500);
+      /* Wait for page write to complete (ATmega64: 4.5ms max) */
+      usleep(flash_mem->min_write_delay);
 
       page_num++;
       report_progress(page_num, npages, page_num == 1 ? "Erasing flash pages" : NULL);
