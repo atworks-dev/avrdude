@@ -1236,7 +1236,7 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
     unsigned int addr;
     int npages = (flash_mem->size + flash_mem->page_size - 1) / flash_mem->page_size;
     int page_num = 0;
-    
+
     for (addr = 0; addr < flash_mem->size; addr += flash_mem->page_size) {
       rc = pgm->page_erase(pgm, p, flash_mem, addr);
       if (rc < 0) {
@@ -1248,9 +1248,47 @@ int avr_flash_erase(PROGRAMMER * pgm, AVRPART * p)
     }
     report_progress(npages, npages, NULL);
   } else {
-    /* Fall back to chip erase if page erase is not available */
-    fprintf(stderr, "Warning: Page erase not available, performing chip erase\n");
+    /* Page erase not available - preserve EEPROM during chip erase */
+    AVRMEM * eeprom_mem = avr_locate_mem(p, "eeprom");
+    unsigned char * eeprom_backup = NULL;
+    unsigned int eeprom_size = 0;
+
+    if (eeprom_mem != NULL && eeprom_mem->size > 0) {
+      eeprom_size = eeprom_mem->size;
+      eeprom_backup = malloc(eeprom_size);
+      if (eeprom_backup == NULL) {
+        fprintf(stderr, "Error: Failed to allocate memory for EEPROM backup\n");
+        return -1;
+      }
+
+      /* Read EEPROM contents before chip erase */
+      printf("Reading EEPROM contents before chip erase...\n");
+      rc = avr_read(pgm, p, "eeprom", 0, eeprom_backup, eeprom_size);
+      if (rc < 0) {
+        fprintf(stderr, "Warning: Failed to read EEPROM contents for backup\n");
+        free(eeprom_backup);
+        eeprom_backup = NULL;
+      }
+    }
+
+    /* Perform chip erase */
+    printf("Performing chip erase...\n");
     rc = pgm->chip_erase(pgm, p);
+
+    /* Restore EEPROM contents if backup was successful */
+    if (rc >= 0 && eeprom_backup != NULL) {
+      printf("Restoring EEPROM contents after chip erase...\n");
+      int restore_rc = avr_write(pgm, p, "eeprom", 0, eeprom_backup, eeprom_size);
+      if (restore_rc < 0) {
+        fprintf(stderr, "Warning: Failed to restore EEPROM contents after chip erase\n");
+      } else {
+        printf("EEPROM contents successfully preserved\n");
+      }
+    }
+
+    if (eeprom_backup != NULL) {
+      free(eeprom_backup);
+    }
   }
   
   return rc;
